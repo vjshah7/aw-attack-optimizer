@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from typing import Any
+
 import itertools
 import AWConfig
 import DefenseConfig
@@ -21,21 +21,22 @@ from ortools.sat.python import cp_model
  Following are descriptions of other concepts associated with defenders that are modeled.
 5. 50 defenders are specified. All defenders are unique.
 6. Each defender is associated with a set of up to 5 unique specified champions, called "VALID COUNTERS".
-7. The 50 defenders each belong to one of a small number (~15) of "DEFENSE GROUPS" of size 1-4. Each defender exists in
- one and only one defense group. Each defense group has a sequence number. Multiple defense groups may have the same 
- sequence number. A defense group may optionally also have a “side” number.
+7. The 50 defenders each belong to one of a small number (~15) of "DEFENSE SECTIONS" of size 1-4. Each defender exists
+ in one and only one defense section. Each defense section has a sequence number. Multiple defense sections may have the 
+ same sequence number. A defense section may optionally also have a “side” number.
 8. Every defender is associated with an attacking team and an attacking champion. The attacking team
  must be one of the 10 teams described above. The attacking champion must be one of the 3 champions on that team.
  The attacking champion must be equal to one of the valid counters for the defender. A champion may be assigned as the
  attacker for more than one defender.
-9. Defenders in different defense groups with the same sequence number cannot be assigned the same attacking team. 
- For any 2 defense groups with specified, distinct side numbers: the assigned attacking team for the defenders in one 
- defense group cannot be the same as the assigned attacking team for defenders in the other defense group.
+9. Defenders in different defense sections with the same sequence number cannot be assigned the same attacking team. 
+ For any 2 defense sections with specified, distinct side numbers: the assigned attacking team for the defenders in one 
+ defense section cannot be the same as the assigned attacking team for defenders in the other defense section.
 '''
 
 aw_config = AWConfig.AWConfig(250)
 all_champions = aw_config.get_all_champions()
 num_rosters = aw_config.get_num_rosters()
+team_size = aw_config.get_team_size()
 
 defense_config = DefenseConfig.load_defense_config_from_file('dc-2.json')
 roster_set = RosterSet.load_roster_set_from_file('rosterset-1.json')
@@ -47,19 +48,19 @@ model = cp_model.CpModel()
 # construct teams, with constraints on only allowing champs from the respective roster and ensuring all 3 team members
 #  are different
 teams = list()
-for ii in range(num_rosters):
+for roster_id in roster_ids:
     team_champs = list()
-    for jj in range(aw_config.get_team_size()):
-        team_champs.append(model.NewIntVar(1, max(all_champions), "team{}-spot{}".format(ii, jj)))
+    for jj in range(team_size):
+        team_champs.append(model.NewIntVar(1, max(all_champions), "team {} - slot {}".format(roster_id, jj)))
     for champ in team_champs:
-        roster_champs = roster_set.get_roster(ii)
+        roster_champs = roster_set.get_roster(roster_id)
         model.AddAllowedAssignments([champ], list((x,) for x in roster_champs))
     # TODO eventually support different rarities. for now, all champs must be unique
     model.AddAllDifferent(team_champs)
     teams.append(team_champs)
 
 # attacker/team assignments for defenders, along with valid counter constraints
-defender_assignments: dict[Any, Any] = {}
+defender_assignments: dict[int, dict[str, cp_model.IntVar]] = {}
 section_names = defense_config.get_all_sections()
 for section_name in section_names:
     section = defense_config.get_section(section_name)
@@ -74,116 +75,116 @@ for section_name in section_names:
                                                              "{}-node{}-team".format(section_name, node))
 
 # DEFENSE GROUP TEAM ASSIGNMENT CONSISTENCY CHECKS
-# bools to tell if each defender in a group is assigned to a particular team
-defender_team_ass_checks: dict[Any, Any] = {}
+# bools to tell if each defender in a section is assigned to a particular team
+defender_team_ass_checks: dict[str, dict[int, dict[int, cp_model.IntVar]]] = {}
 for section_name in section_names:
     section = defense_config.get_section(section_name)
     defender_team_ass_checks[section_name] = {}
     for node in section.get_nodes():
         defender_team_ass_checks[section_name][node] = {}
-        for team in range(num_rosters):
-            defender_team_ass_checks[section_name][node][team] = model.NewBoolVar("{} node {} assigned to team {}?"
-                                                                                  .format(section_name, node, team))
-            model.Add(defender_assignments[node]['team'] == team) \
-                .OnlyEnforceIf(defender_team_ass_checks[section_name][node][team])
-            model.Add(defender_assignments[node]['team'] != team) \
-                .OnlyEnforceIf(defender_team_ass_checks[section_name][node][team].Not())
-# all defenders in a group must be assigned to the same team. so the defender team assignment bools should
-#  either be all true or all false for every node in a dg
-for dg in list(defense_config.keys()):
-    for team in range(num_rosters):
-        for ii in range(len(defense_config[dg]['nodes']) - 1):
-            node1 = defense_config[dg]['nodes'][ii]
-            node2 = defense_config[dg]['nodes'][ii + 1]
-            model.Add(defender_team_ass_checks[dg][node1][team] == defender_team_ass_checks[dg][node2][team])
-# master bools to tell whether an entire def group is assigned to a particular team
-dg_team_ass_checks: dict[Any, Any] = {}
-for dg in list(defense_config.keys()):
-    dg_team_ass_checks[dg] = {}
-    for team in range(num_rosters):
-        dg_team_ass_checks[dg][team] = model.NewBoolVar("{} all def assigned to team {}?".format(dg, team))
-        model.AddBoolAnd(list(defender_team_ass_checks[dg][node][team] for node in defense_config[dg]['nodes'])) \
-            .OnlyEnforceIf(dg_team_ass_checks[dg][team])
-        model.AddBoolAnd(list(defender_team_ass_checks[dg][node][team].Not() for node in defense_config[dg]['nodes'])) \
-            .OnlyEnforceIf(dg_team_ass_checks[dg][team].Not())
-# a defense group cannot be assigned to multiple teams. iow for each defense group, exactly 1 of the team assignment
-#  check bools defined above will be true. so for each team, we check that if the team assignment check for the dg
-#  is true, then the other 9 team assignment checks are all false
-for dg in list(defense_config.keys()):
-    # at least one of the team assignment checks is true for the dg
-    model.AddBoolOr(list(dg_team_ass_checks[dg][team] for team in range(num_rosters)))
-    teams_lst = list(dg_team_ass_checks[dg].keys())
-    for ii in range(len(teams_lst)):
-        # if this team's assignment check for the dg is true, all others are false
-        cur_team_ass_check = dg_team_ass_checks[dg][teams_lst[ii]]
-        other_teams_ass_check_lst = teams_lst[:ii] + teams_lst[ii + 1:]
-        model.AddBoolAnd(list(dg_team_ass_checks[dg][team].Not() for team in other_teams_ass_check_lst)) \
-            .OnlyEnforceIf(cur_team_ass_check)
+        for roster_id in roster_ids:
+            defender_team_ass_checks[section_name][node][roster_id] = model.NewBoolVar("{} node {} assigned to team {}?"
+                                                                                       .format(section_name, node,
+                                                                                               roster_id))
+            model.Add(defender_assignments[node]['team'] == roster_id) \
+                .OnlyEnforceIf(defender_team_ass_checks[section_name][node][roster_id])
+            model.Add(defender_assignments[node]['team'] != roster_id) \
+                .OnlyEnforceIf(defender_team_ass_checks[section_name][node][roster_id].Not())
+# broader bools ("SRAC"s) to tell if any defender in a section is assigned to a particular team
+section_roster_ass_checks: dict[str, dict[int, cp_model.IntVar]] = {}
+for section_name in section_names:
+    section_nodes = defense_config.get_section(section_name).get_nodes()
+    section_roster_ass_checks[section_name] = {}
+    for roster_id in roster_ids:
+        section_roster_ass_checks[section_name][roster_id] = model.NewBoolVar("team {} traveling to {}?"
+                                                                              .format(roster_id, section_name))
+        model.AddBoolOr(list(defender_team_ass_checks[section_name][node][roster_id] for node in section_nodes)) \
+            .OnlyEnforceIf(section_roster_ass_checks[section_name][roster_id])
+        model.AddBoolAnd(list(defender_team_ass_checks[section_name][node][roster_id].Not()
+                              for node in section_nodes)) \
+            .OnlyEnforceIf(section_roster_ass_checks[section_name][roster_id].Not())
 
 # ATTACKER ASSIGNMENT/TEAM MEMBERSHIP consistency checks
-att_team_ass_checks: dict[Any, Any] = {}
-for dg in list(defense_config.keys()):
-    att_team_ass_checks[dg] = {}
-    for node in defense_config[dg]['nodes']:
-        att_team_ass_checks[dg][node] = {}
-        for team in range(num_rosters):
-            att_team_ass_checks[dg][node][team] = {}
+att_roster_ass_checks: dict[str, dict[int, dict[int, dict[int, cp_model.IntVar]]]] = {}
+for section_name in section_names:
+    section = defense_config.get_section(section_name)
+    att_roster_ass_checks[section_name] = {}
+    for node in section.get_nodes():
+        att_roster_ass_checks[section_name][node] = {}
+        for roster_id in roster_ids:
+            att_roster_ass_checks[section_name][node][roster_id] = {}
             for slot in range(team_size):
-                # check if attacker assignment for a defender in a particular group matches a particular team member
-                att_team_ass_checks[dg][node][team][slot] = \
+                # check if attacker assignment for a defender in a particular section matches a particular team member
+                att_roster_ass_checks[section_name][node][roster_id][slot] = \
                     model.NewBoolVar("{} node {} attacker matches team {} slot {}?"
-                                     .format(dg, node, team, slot))
-                model.Add(defender_assignments[node]['attacker'] == teams[team][slot]) \
-                    .OnlyEnforceIf(att_team_ass_checks[dg][node][team][slot])
-                model.Add(defender_assignments[node]['attacker'] != teams[team][slot]) \
-                    .OnlyEnforceIf(att_team_ass_checks[dg][node][team][slot].Not())
+                                     .format(section_name, node, roster_id, slot))
+                model.Add(defender_assignments[node]['attacker'] == teams[roster_id][slot]) \
+                    .OnlyEnforceIf(att_roster_ass_checks[section_name][node][roster_id][slot])
+                # NO constraint for the inverse, because the same champ can be on multiple teams, so it's ok to have
+                # an assigned attacked match a member on team x even if team x is not assigned
             # an attacker assignment must match one of the attackers on team x if team x was assigned
-            model.AddBoolOr(list(att_team_ass_checks[dg][node][team][slot] for slot in range(team_size))) \
-                .OnlyEnforceIf(defender_team_ass_checks[dg][node][team])
+            model.AddBoolOr(list(att_roster_ass_checks[section_name][node][roster_id][slot]
+                                 for slot in range(team_size))) \
+                .OnlyEnforceIf(defender_team_ass_checks[section_name][node][roster_id])
             # NO constraint for the inverse, because the same champ can be on multiple teams, so we could
             #  have a assigned attacker match a member on team x even if team x is not assigned
 
 # sequence number constraints
-dgs_by_seq_num: dict[Any, Any] = {}
-for dg in list(defense_config.keys()):
-    seq_num = defense_config[dg]['sequence_num']
-    if seq_num in dgs_by_seq_num:
-        dgs_by_seq_num[seq_num].append(dg)
+sections_by_seq_num: dict[int, list] = {}
+for section_name in section_names:
+    seq_num = defense_config.get_section(section_name).get_sequence_num()
+    if seq_num in sections_by_seq_num:
+        sections_by_seq_num[seq_num].append(section_name)
     else:
-        dgs_by_seq_num[seq_num] = [dg]
-for seq_num in dgs_by_seq_num:
-    # the same team cannot be assigned to any 2 defense groups with the same sequence number
-    # we don't have a var for the team assigned to a defense group, but because of other constraints, we can
-    #  just use the team assigned to the first node in a defense group to represent the group assignment
-    dg_first_nodes = list(defense_config[dg]['nodes'][0] for dg in dgs_by_seq_num[seq_num])
-    model.AddAllDifferent(list(defender_assignments[node]['team'] for node in dg_first_nodes))
+        sections_by_seq_num[seq_num] = [section_name]
+# the same team cannot be assigned to any 2 nodes in different defense groups with the same sequence number
+for seq_num in sections_by_seq_num:
+    seq_sections = sections_by_seq_num[seq_num]
+    num_sections = len(seq_sections)
+    # if we look at the set of the section team assignments checks for this team, for all sections with this sequence
+    #  number - at most 1 of the check vars can be true.
+    for roster_id in roster_ids:
+        # assemble the set of section roster assignment checks for this team for all sections with this seq number
+        srac_bools = list(section_roster_ass_checks[section_name][roster_id] for section_name in seq_sections)
+        # cp model bool var is just an int var that can only be 0 or 1
+        # create a tuple of the form (1, 0, 0, ...), where the number of 0s ("False"s) is 1 less than the number of
+        #  sections
+        base_rep_single_true = tuple(x for x in [1] + [0] * (num_sections - 1))
+        # use itertools to create all permutations of that tuple (eg (1, 0, 0, ...), (0, 1, 0, ...), (0, 0, 1, ...),
+        #  ...)
+        # put into a set and then back into a list to remove dupes
+        all_perms = list(set(itertools.permutations(base_rep_single_true)))
+        # enforce that at most one assignment can be true for this team for sections in this seq num. need to add on
+        #  the case of all false (this team is not assigned to any sections in this seq number)
+        model.AddAllowedAssignments(srac_bools, all_perms + [tuple(x for x in [0] * num_sections)])
 
-# # side number constraints
-# dgs_by_side_num: dict[Any, Any] = {}
-# for dg in list(defense_config.keys()):
-#     side_num = defense_config[dg]['side_num']
-#     if side_num >= 0:
-#         if side_num in dgs_by_side_num:
-#             dgs_by_side_num[side_num].append(dg)
-#         else:
-#             dgs_by_side_num[side_num] = [dg]
-# side_num_lst = list(dgs_by_side_num.keys())
-# # a team cannot be assigned to any 2 defense groups with different side numbers
-# #  go through the first n-1 elements of the dgs_by_side_num key list and set up inequalities for the team assignment
-# #  between the "current" dg and each dg from the following side numbers
-# for ii in range(len(side_num_lst) - 1):
-#     cur_dgs = dgs_by_side_num[side_num_lst[ii]]
-#     remaining_side_nums_lst = side_num_lst[ii+1:]
-#     remaining_dgs_2d = list(dgs_by_side_num[side_num] for side_num in remaining_side_nums_lst)
-#     remaining_dgs = list(itertools.chain(*remaining_dgs_2d))
-#     print("cur dgs: {}, remaining dgs: {}".format(cur_dgs, remaining_dgs))
-#     remaining_dgs_first_nodes = list(defense_config[dg]['nodes'][0] for dg in remaining_dgs)
-#     for dg in cur_dgs:
-#         first_node = defense_config[dg]['nodes'][0]
-#         for remaining_dg_first_node in remaining_dgs_first_nodes:
-#             # we don't have a var for the team assigned to a defense group, but because of other constraints, we can
-#             #  just use the team assigned to the first node in a defense group to represent the group assignment
-#             model.Add(defender_assignments[first_node]['team'] != defender_assignments[remaining_dg_first_node]['team'])
+# side number constraints
+sections_by_side_num: dict[int, list] = {}
+for section_name in section_names:
+    side_num = defense_config.get_section(section_name).get_side_num()
+    if DefenseConfig.is_valid_side_num(side_num):
+        if side_num in sections_by_side_num:
+            sections_by_side_num[side_num].append(section_name)
+        else:
+            sections_by_side_num[side_num] = [section_name]
+side_num_lst = list(sections_by_side_num.keys())
+# a team cannot be assigned to any 2 defense sections with different side numbers
+#  go through the first n-1 elements of the sections_by_side_num key list and make sure no assignments exist for each
+#  team for each section from the remaining side numbers if there is an assigment for that team in a section in the
+#  "current" side num
+for ii in range(len(side_num_lst) - 1):
+    cur_sections = sections_by_side_num[side_num_lst[ii]]
+    remaining_side_nums_lst = side_num_lst[ii + 1:]
+    remaining_sections_2d = list(sections_by_side_num[side_num] for side_num in remaining_side_nums_lst)
+    remaining_sections = list(itertools.chain(*remaining_sections_2d))
+    print("sections in side num {}: {}, sections in other side nums: {}"
+          .format(side_num_lst[ii], cur_sections, remaining_sections))
+    for roster_id in roster_ids:
+        remaining_sections_srac_bools = list(section_roster_ass_checks[section_name][roster_id]
+                                             for section_name in remaining_sections)
+        for section_name in cur_sections:
+            model.AddBoolAnd(list(x.Not() for x in remaining_sections_srac_bools)) \
+                .OnlyEnforceIf(section_roster_ass_checks[section_name][roster_id])
 
 # SOLVER
 solver = cp_model.CpSolver()
@@ -193,16 +194,16 @@ status = solver.Solve(model)
 print("status: {}, time: {} s"
       .format(solver.StatusName(status), solver.WallTime()))
 if status == cp_model.FEASIBLE or status == cp_model.OPTIMAL:
-    for team_num in range(len(teams)):
-        print("team {}:".format(team_num))
-        for slot in teams[team_num]:
+    for ii in range(len(roster_ids)):
+        print("team {}:".format(roster_ids[ii]))
+        for slot in teams[ii]:
             print("\t{}"
                   .format(solver.Value(slot)))
     print("")
 
-    for dg in defense_config:
-        print("dg {}:".format(dg))
-        for node in defense_config[dg]['nodes']:
+    for section_name in section_names:
+        print("section {}:".format(section_name))
+        for node in defense_config.get_section(section_name).get_nodes():
             print("\tnode {}: team {}, attacker {}".format(node,
                                                            solver.Value(defender_assignments[node]['team']),
                                                            solver.Value(defender_assignments[node]['attacker'])))

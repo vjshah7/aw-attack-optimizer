@@ -22,6 +22,10 @@ class SectionConfig:
         return self._side_num
 
 
+def is_valid_side_num(side_num: int) -> bool:
+    return side_num >= 0
+
+
 class DefenseConfig:
     _data: dict[str, SectionConfig]
 

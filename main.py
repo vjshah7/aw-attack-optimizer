@@ -51,7 +51,7 @@ teams = list()
 for roster_id in roster_ids:
     team_champs = list()
     for jj in range(team_size):
-        team_champs.append(model.NewIntVar(1, max(all_champions), "team {} - slot {}".format(roster_id, jj)))
+        team_champs.append(model.NewIntVar(min(all_champions), max(all_champions), "team {} - slot {}".format(roster_id, jj)))
     for champ in team_champs:
         roster_champs = roster_set.get_roster(roster_id)
         model.AddAllowedAssignments([champ], list((x,) for x in roster_champs))
@@ -66,11 +66,12 @@ for section_name in section_names:
     section = defense_config.get_section(section_name)
     for node in section.get_nodes():
         defender_assignments[node] = {}
-        defender_assignments[node]['attacker'] = model.NewIntVar(1, max(all_champions), "{}-node{}-att"
+        defender_assignments[node]['attacker'] = model.NewIntVar(min(all_champions), max(all_champions), "{}-node{}-att"
                                                                  .format(section_name, node))
         counters = counter_config.get_node_counters(node)
         model.AddAllowedAssignments([defender_assignments[node]['attacker']],
                                     list((x,) for x in counters))
+        # do not use roster ids here, just the range of num rosters... ie the index of the roster in the roster list
         defender_assignments[node]['team'] = model.NewIntVar(0, num_rosters - 1,
                                                              "{}-node{}-team".format(section_name, node))
 
@@ -149,14 +150,13 @@ for seq_num in sections_by_seq_num:
         # cp model bool var is just an int var that can only be 0 or 1
         # create a tuple of the form (1, 0, 0, ...), where the number of 0s ("False"s) is 1 less than the number of
         #  sections
-        base_rep_single_true = tuple(x for x in [1] + [0] * (num_sections - 1))
-        # use itertools to create all permutations of that tuple (eg (1, 0, 0, ...), (0, 1, 0, ...), (0, 0, 1, ...),
-        #  ...)
+        base_rep_single_true = tuple([1] + [0] * (num_sections - 1))
+        # create all permutations of that tuple (eg (1, 0, 0, ...), (0, 1, 0, ...), (0, 0, 1, ...), ...)
         # put into a set and then back into a list to remove dupes
         all_perms = list(set(itertools.permutations(base_rep_single_true)))
         # enforce that at most one assignment can be true for this team for sections in this seq num. need to add on
         #  the case of all false (this team is not assigned to any sections in this seq number)
-        model.AddAllowedAssignments(srac_bools, all_perms + [tuple(x for x in [0] * num_sections)])
+        model.AddAllowedAssignments(srac_bools, all_perms + [tuple([0] * num_sections)])
 
 # side number constraints
 sections_by_side_num: dict[int, list] = {}
@@ -170,19 +170,22 @@ for section_name in section_names:
 side_num_lst = list(sections_by_side_num.keys())
 # a team cannot be assigned to any 2 defense sections with different side numbers
 #  go through the first n-1 elements of the sections_by_side_num key list and make sure no assignments exist for each
-#  team for each section from the remaining side numbers if there is an assigment for that team in a section in the
+#  team for each section from the remaining side numbers, if there is an assigment for that team in a section in the
 #  "current" side num
 for ii in range(len(side_num_lst) - 1):
     cur_sections = sections_by_side_num[side_num_lst[ii]]
     remaining_side_nums_lst = side_num_lst[ii + 1:]
+    # get list of lists of section names from all other side nums and flatten it
     remaining_sections_2d = list(sections_by_side_num[side_num] for side_num in remaining_side_nums_lst)
     remaining_sections = list(itertools.chain(*remaining_sections_2d))
-    print("sections in side num {}: {}, sections in other side nums: {}"
-          .format(side_num_lst[ii], cur_sections, remaining_sections))
+    # print("sections in side num {}: {}, sections in other side nums: {}"
+    #       .format(side_num_lst[ii], cur_sections, remaining_sections))
     for roster_id in roster_ids:
         remaining_sections_srac_bools = list(section_roster_ass_checks[section_name][roster_id]
                                              for section_name in remaining_sections)
         for section_name in cur_sections:
+            # if this team is assigned to a section with current side num, make sure all other sections in other
+            #  side nums are NOT assigned to the team
             model.AddBoolAnd(list(x.Not() for x in remaining_sections_srac_bools)) \
                 .OnlyEnforceIf(section_roster_ass_checks[section_name][roster_id])
 
